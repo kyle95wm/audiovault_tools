@@ -13,131 +13,148 @@ AVO_HEAD_PATH = os.path.expanduser("~/audio-vault-assets/avo_head.mp3")
 AVO_TAIL_PATH = os.path.expanduser("~/audio-vault-assets/avo_tail.mp3")
 SILENCE_PATH = os.path.expanduser("~/audio-vault-assets/silence_1s.mp3")
 
-def generate_silence(path):
-    subprocess.run([
+def generate_silence(path, dry_run=False):
+    cmd = [
         "ffmpeg", "-y",
         "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
         "-t", "1",
         "-acodec", "libmp3lame", "-b:a", "192k",
         path
-    ], check=True)
+    ]
+    if dry_run:
+        print("Dry run:", " ".join(cmd))
+    else:
+        subprocess.run(cmd, check=True)
 
-def ensure_stereo_cbr(input_path, output_path):
-    subprocess.run([
+def ensure_stereo_cbr(input_path, output_path, dry_run=False):
+    cmd = [
         "ffmpeg", "-y", "-i", input_path,
         "-ar", "48000", "-ac", "2", "-b:a", "192k",
         output_path
-    ], check=True)
+    ]
+    if dry_run:
+        print("Dry run:", " ".join(cmd))
+    else:
+        subprocess.run(cmd, check=True)
 
-def concat_parts(parts, output_file):
-    concat_txt = tempfile.mktemp(suffix=".txt")
-    with open(concat_txt, "w") as f:
-        for part in parts:
-            f.write(f"file '{part}'\n")
+def process_file(input_file, output_file, add_bumper=False, skip_bumper=False, dry_run=False):
+    temp_mastered = tempfile.mktemp(suffix=".mp3")
 
-    subprocess.run([
-        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_txt,
-        "-c", "copy", output_file
-    ], check=True)
+    if not add_bumper:
+        cmd = [
+            "ffmpeg", "-y", "-i", input_file,
+            "-af", f"acompressor=threshold=-18dB:ratio=3:attack=10:release=200,"
+                   f"loudnorm=I={PROFILE['LUFS']}:LRA={PROFILE['LRA']}:TP={PROFILE['TP']}",
+            "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+            temp_mastered
+        ]
+        if dry_run:
+            print("Dry run:", " ".join(cmd))
+        else:
+            subprocess.run(cmd, check=True)
+    else:
+        temp_mastered = input_file
 
-    os.remove(concat_txt)
-
-def add_bumpers(input_file, output_file, force=False):
-    if os.path.exists(output_file) and not force:
-        print(f"Skipping {output_file} (already exists)")
-        return
-
-    if not os.path.exists(AVO_HEAD_PATH) or not os.path.exists(AVO_TAIL_PATH):
-        raise FileNotFoundError("Bumper files missing")
-
+    for asset in [AVO_HEAD_PATH, AVO_TAIL_PATH]:
+        if not os.path.exists(asset):
+            raise FileNotFoundError(f"Missing asset: {asset}")
     if not os.path.exists(SILENCE_PATH):
-        print("Generating 1s silence...")
-        os.makedirs(os.path.dirname(SILENCE_PATH), exist_ok=True)
-        generate_silence(SILENCE_PATH)
+        print("Silence file not found, generating...")
+        if not dry_run:
+            os.makedirs(os.path.dirname(SILENCE_PATH), exist_ok=True)
+        generate_silence(SILENCE_PATH, dry_run=dry_run)
 
-    head = tempfile.mktemp(suffix=".mp3")
-    tail = tempfile.mktemp(suffix=".mp3")
-    silence = tempfile.mktemp(suffix=".mp3")
-    ensure_stereo_cbr(AVO_HEAD_PATH, head)
-    ensure_stereo_cbr(AVO_TAIL_PATH, tail)
-    ensure_stereo_cbr(SILENCE_PATH, silence)
+    head_fixed = tempfile.mktemp(suffix=".mp3")
+    tail_fixed = tempfile.mktemp(suffix=".mp3")
+    silence_fixed = tempfile.mktemp(suffix=".mp3")
 
-    concat_parts([head, input_file, silence, tail, silence], output_file)
+    ensure_stereo_cbr(AVO_HEAD_PATH, head_fixed, dry_run=dry_run)
+    ensure_stereo_cbr(AVO_TAIL_PATH, tail_fixed, dry_run=dry_run)
+    ensure_stereo_cbr(SILENCE_PATH, silence_fixed, dry_run=dry_run)
 
-    for path in [head, tail, silence]:
-        os.remove(path)
+    concat_list = tempfile.mktemp(suffix=".txt")
+    with open(concat_list, "w") as f:
+        if not skip_bumper:
+            f.write(f"file '{head_fixed}'\n")
+        f.write(f"file '{temp_mastered}'\n")
+        if not skip_bumper:
+            f.write(f"file '{silence_fixed}'\n")
+            f.write(f"file '{tail_fixed}'\n")
+            f.write(f"file '{silence_fixed}'\n")
 
-    print("Finished:", output_file)
+    cmd_concat = [
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
+        "-c", "copy", output_file
+    ]
+    if dry_run:
+        print("Dry run:", " ".join(cmd_concat))
+    else:
+        subprocess.run(cmd_concat, check=True)
 
-def process_and_bumper(input_file, output_file, force=False):
-    if os.path.exists(output_file) and not force:
-        print(f"Skipping {output_file} (already exists)")
-        return
-
-    temp_mp3 = tempfile.mktemp(suffix=".mp3")
-
-    subprocess.run([
-        "ffmpeg", "-y", "-i", input_file,
-        "-af", f"acompressor=threshold=-18dB:ratio=3:attack=10:release=200,"
-               f"loudnorm=I={PROFILE['LUFS']}:LRA={PROFILE['LRA']}:TP={PROFILE['TP']}",
-        "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        temp_mp3
-    ], check=True)
-
-    add_bumpers(temp_mp3, output_file, force=force)
-    os.remove(temp_mp3)
-
-def run_batch(in_dir, out_dir, add_bumper_mode, force=False):
-    os.makedirs(out_dir, exist_ok=True)
-    files = sorted(os.listdir(in_dir))
-
-    for f in files:
-        ext = os.path.splitext(f)[1].lower()
-        if add_bumper_mode and ext != ".mp3":
-            continue
-        if not add_bumper_mode and ext != ".wav":
-            continue
-
-        in_path = os.path.join(in_dir, f)
-        out_path = os.path.join(out_dir, os.path.splitext(f)[0] + ".mp3")
-
-        try:
-            if add_bumper_mode:
-                add_bumpers(in_path, out_path, force=force)
+    for path in [head_fixed, tail_fixed, silence_fixed, concat_list]:
+        if os.path.exists(path):
+            if dry_run:
+                print(f"Dry run: would remove {path}")
             else:
-                process_and_bumper(in_path, out_path, force=force)
-        except subprocess.CalledProcessError as e:
-            print(f"Failed on {f}: {e}")
+                os.remove(path)
+    if not add_bumper and temp_mastered != input_file and os.path.exists(temp_mastered):
+        if dry_run:
+            print(f"Dry run: would remove {temp_mastered}")
+        else:
+            os.remove(temp_mastered)
+
+    print("Mastering complete:", output_file)
+
+def run_batch(in_dir, out_dir, add_bumper=False, skip_bumper=False, force=False, dry_run=False):
+    for filename in os.listdir(in_dir):
+        input_path = os.path.join(in_dir, filename)
+        if not os.path.isfile(input_path):
+            continue
+
+        name, ext = os.path.splitext(filename)
+        if ext.lower() not in [".wav", ".mp3"]:
+            continue
+
+        output_path = os.path.join(out_dir, name + ".mp3")
+        if os.path.exists(output_path) and not force:
+            print("Skipping existing file:", output_path)
+            continue
+
+        print("Processing:", input_path)
+        process_file(input_path, output_path, add_bumper=add_bumper, skip_bumper=skip_bumper, dry_run=dry_run)
 
 def main():
     parser = argparse.ArgumentParser(description="AudioVault Mastering Tool")
-    parser.add_argument("input", help="Input file or folder")
+    parser.add_argument("input", nargs="?", help="Input file or folder")
     parser.add_argument("output", nargs="?", help="Output file or folder")
-    parser.add_argument("--add-bumper", action="store_true", help="Add bumpers to existing MP3")
-    parser.add_argument("--batch", action="store_true", help="Batch mode (input/output are folders)")
-    parser.add_argument("--force", action="store_true", help="Overwrite existing output files")
+    parser.add_argument("--add-bumper", action="store_true", help="Only add bumpers to existing MP3s")
+    parser.add_argument("--skip-bumper", action="store_true", help="Do not add bumpers")
+    parser.add_argument("--batch", action="store_true", help="Batch mode (input/output folders)")
+    parser.add_argument("--force", action="store_true", help="Force overwrite")
+    parser.add_argument("--dry-run", action="store_true", help="Print what would be done without executing")
+
     args = parser.parse_args()
 
     if args.batch:
-        if not args.output or not os.path.isdir(args.input):
-            print("Batch mode requires two folders: in out")
+        in_dir = args.input or "./in"
+        out_dir = args.output or "./out"
+        if not os.path.isdir(in_dir):
+            print("Missing input folder:", in_dir)
             return
-        run_batch(args.input, args.output, args.add_bumper, force=args.force)
+        if not os.path.isdir(out_dir):
+            if args.dry_run:
+                print(f"Dry run: would create folder {out_dir}")
+            else:
+                os.makedirs(out_dir)
+        run_batch(in_dir, out_dir, add_bumper=args.add_bumper, skip_bumper=args.skip_bumper, force=args.force, dry_run=args.dry_run)
     else:
-        if not args.output or not os.path.isfile(args.input):
-            print("Single file mode requires input file and output file.")
+        if not args.input or not args.output:
+            print("In single mode, both input and output files must be specified.")
             return
-        if args.add_bumper and not args.input.lower().endswith(".mp3"):
-            print("With --add-bumper, input must be an MP3.")
+        if not os.path.isfile(args.input):
+            print("Invalid input file.")
             return
-        if not args.add_bumper and not args.input.lower().endswith(".wav"):
-            print("Input must be a WAV unless --add-bumper is used.")
-            return
-
-        if args.add_bumper:
-            add_bumpers(args.input, args.output, force=args.force)
-        else:
-            process_and_bumper(args.input, args.output, force=args.force)
+        process_file(args.input, args.output, add_bumper=args.add_bumper, skip_bumper=args.skip_bumper, dry_run=args.dry_run)
 
 if __name__ == "__main__":
     main()
