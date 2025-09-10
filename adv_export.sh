@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# avo_mp3_export.sh
+# avo_mp3_export.sh (adv_export)
 # Batch export to MP3 192 kbps CBR (LAME), joint stereo disabled.
 # - Prompts (or lets you specify) which audio stream to use when inputs have multiple tracks.
 # - Warns/skips if chosen stream has >2 ch unless --force is used.
@@ -176,6 +176,11 @@ for input in "${FILES[@]}"; do
 
   base="${input##*/}"
   name="${base%.*}"
+  # Strip a trailing "_Stereo" (case-insensitive) from the base name
+  # e.g., "MyFile_Stereo.wav" -> "MyFile.mp3"
+  name="$(printf '%s' "$name" | sed -E 's/_[Ss][Tt][Ee][Rr][Ee][Oo]$//')"
+  # (Optional) also strip _Mono if you ever need it:
+  # name="$(printf '%s' "$name" | sed -E 's/_[Mm][Oo][Nn][Oo]$//')"
   out="${name}.mp3"
 
   echo "🎧 Processing: $input  (a:$stream_idx, ${ch}ch${lay:+, $lay})  →  $out" >&2
