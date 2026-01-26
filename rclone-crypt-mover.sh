@@ -17,7 +17,6 @@ need_cmd sed
 CAFFEINATE_PID=""
 
 start_caffeinate() {
-  # Only on macOS, only if caffeinate exists
   if [[ "$(uname -s)" == "Darwin" ]] && command -v caffeinate >/dev/null 2>&1; then
     echo "Preventing system sleep (caffeinate)"
     caffeinate -i &
@@ -36,6 +35,7 @@ trap stop_caffeinate EXIT INT TERM
 
 COMMIT=0
 FROM_LOCAL=""
+CLEAN_MACOS_JUNK="auto" # auto | on | off
 
 # ---------------- argument parsing ----------------
 while [[ $# -gt 0 ]]; do
@@ -50,6 +50,14 @@ while [[ $# -gt 0 ]]; do
       FROM_LOCAL="$1"
       shift
       ;;
+    --clean-macos-junk)
+      CLEAN_MACOS_JUNK="on"
+      shift
+      ;;
+    --no-clean-macos-junk)
+      CLEAN_MACOS_JUNK="off"
+      shift
+      ;;
     -h|--help)
       cat <<'EOF'
 Usage:
@@ -58,21 +66,17 @@ Usage:
   rclone-crypt-mover.sh --from-local <path>
   rclone-crypt-mover.sh --from-local <path> --commit
 
-Modes:
-  Default:
-    Interactive move between plaintext and crypt remotes (encrypt/decrypt).
-    Dry-run by default.
-
-  --from-local <path>:
-    Copy a local file or directory to a selected remote destination.
-    Uses copy (never move). Dry-run by default.
-
 Options:
-  --commit   Perform real operations (otherwise dry-run)
-  --help     Show this help
+  --commit               Perform real operations (otherwise dry-run)
+  --from-local <path>    Copy a local file/folder to a selected destination (copy, not move)
+  --clean-macos-junk     Force-exclude macOS metadata junk files for local uploads
+  --no-clean-macos-junk  Disable auto-excludes for local uploads
+  --help                 Show this help
 
-Notes:
-  - On macOS, the script will run `caffeinate -i` after confirmation to prevent sleep.
+Defaults:
+  - Dry-run by default.
+  - On macOS, when --from-local is used, macOS junk excludes are auto-enabled unless disabled.
+  - On macOS, after confirmation, the script runs `caffeinate -i` to prevent sleep.
   - In --commit move mode, the script auto-cleans empty directories left behind on the source.
 EOF
       exit 0
@@ -83,6 +87,30 @@ EOF
       ;;
   esac
 done
+
+# ---------------- macOS junk excludes (auto for --from-local on macOS) ----------------
+EFFECTIVE_CLEAN=0
+if [[ "$CLEAN_MACOS_JUNK" == "on" ]]; then
+  EFFECTIVE_CLEAN=1
+elif [[ "$CLEAN_MACOS_JUNK" == "off" ]]; then
+  EFFECTIVE_CLEAN=0
+else
+  if [[ -n "$FROM_LOCAL" && "$(uname -s)" == "Darwin" ]]; then
+    EFFECTIVE_CLEAN=1
+  fi
+fi
+
+RCLONE_EXCLUDES=()
+if [[ $EFFECTIVE_CLEAN -eq 1 ]]; then
+  RCLONE_EXCLUDES+=(
+    --exclude ".DS_Store"
+    --exclude "**/.DS_Store"
+    --exclude "._*"
+    --exclude ".Spotlight-V100/**"
+    --exclude ".Trashes/**"
+  )
+fi
+# -------------------------------------------------------------------------------------
 
 # ---------------- remote roots ----------------
 MOV_AVAIL='db:ADCC Folders/ADCC Proxies/Movies/available'
@@ -135,6 +163,11 @@ Shows  → crypt             | $CRYPT_TV
   echo "Destination:   $DEST_PATH"
   echo
 
+  if [[ $EFFECTIVE_CLEAN -eq 1 ]]; then
+    echo "macOS junk filter: ON (.DS_Store, ._* , Spotlight, Trashes)"
+    echo
+  fi
+
   if [[ $COMMIT -eq 1 ]]; then
     echo "MODE: REAL COPY"
   else
@@ -145,13 +178,12 @@ Shows  → crypt             | $CRYPT_TV
   read -r -p "Proceed? (yes/no): " confirm
   case "$confirm" in yes|y|Y) ;; *) echo "Cancelled."; exit 0 ;; esac
 
-  # Start sleep prevention only after user confirms
   start_caffeinate
 
   if [[ -d "$FROM_LOCAL" ]]; then
-    CMD=(rclone copy "$FROM_LOCAL" "$DEST_PATH" -P -v)
+    CMD=(rclone copy "$FROM_LOCAL" "$DEST_PATH" -P -v "${RCLONE_EXCLUDES[@]}")
   else
-    CMD=(rclone copyto "$FROM_LOCAL" "$DEST_PATH" -P -v)
+    CMD=(rclone copyto "$FROM_LOCAL" "$DEST_PATH" -P -v "${RCLONE_EXCLUDES[@]}")
   fi
 
   [[ $COMMIT -eq 0 ]] && CMD+=(--dry-run)
@@ -222,7 +254,6 @@ echo
 read -r -p "Proceed? (yes/no): " confirm
 case "$confirm" in yes|y|Y) ;; *) echo "Cancelled."; exit 0 ;; esac
 
-# Start sleep prevention only after user confirms
 start_caffeinate
 
 echo
@@ -288,7 +319,7 @@ echo "$selections" | while IFS= read -r rel; do
   echo
 done
 
-# Optional final cleanup: remove any empty directories under the route's source root
+# Final cleanup: remove any empty directories under the route's source root
 # (keeps the root folder itself, e.g. "available" / "Active")
 if [[ $COMMIT -eq 1 ]]; then
   echo "Final cleanup: removing empty directories under source root..."
