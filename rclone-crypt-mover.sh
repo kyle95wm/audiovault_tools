@@ -73,6 +73,7 @@ Options:
 
 Notes:
   - On macOS, the script will run `caffeinate -i` after confirmation to prevent sleep.
+  - In --commit move mode, the script auto-cleans empty directories left behind on the source.
 EOF
       exit 0
       ;;
@@ -272,10 +273,27 @@ echo "$selections" | while IFS= read -r rel; do
 
   if [[ $COMMIT -eq 1 ]]; then
     rclone moveto "$src_item" "$dst_item" -P -v
+
+    # Auto-cleanup: if this selection was a directory, remove empty dirs left behind
+    if [[ "$rel" == */ ]]; then
+      echo
+      echo "Cleaning up empty directories under source selection..."
+      rclone rmdirs "$src_item" -v || true
+      echo
+    fi
   else
     rclone moveto "$src_item" "$dst_item" -P -v --dry-run
   fi
+
   echo
 done
+
+# Optional final cleanup: remove any empty directories under the route's source root
+# (keeps the root folder itself, e.g. "available" / "Active")
+if [[ $COMMIT -eq 1 ]]; then
+  echo "Final cleanup: removing empty directories under source root..."
+  rclone rmdirs "$src_root" --leave-root -v || true
+  echo
+fi
 
 echo "Done."
