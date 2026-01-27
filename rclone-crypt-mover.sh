@@ -76,6 +76,7 @@ Options:
 Defaults:
   - Dry-run by default.
   - On macOS, when --from-local is used, macOS junk excludes are auto-enabled unless disabled.
+    (Note: excludes apply to directory uploads; single-file uploads use copyto and don't use filters.)
   - On macOS, after confirmation, the script runs `caffeinate -i` to prevent sleep.
   - In --commit move mode, the script auto-cleans empty directories left behind on the source.
 EOF
@@ -163,9 +164,16 @@ Shows  → crypt             | $CRYPT_TV
   echo "Destination:   $DEST_PATH"
   echo
 
-  if [[ $EFFECTIVE_CLEAN -eq 1 ]]; then
-    echo "macOS junk filter: ON (.DS_Store, ._* , Spotlight, Trashes)"
-    echo
+  if [[ -d "$FROM_LOCAL" ]]; then
+    if [[ $EFFECTIVE_CLEAN -eq 1 ]]; then
+      echo "macOS junk filter: ON for directory uploads (.DS_Store, ._* , Spotlight, Trashes)"
+      echo
+    fi
+  else
+    if [[ $EFFECTIVE_CLEAN -eq 1 ]]; then
+      echo "macOS junk filter: (not needed for single-file upload)"
+      echo
+    fi
   fi
 
   if [[ $COMMIT -eq 1 ]]; then
@@ -181,9 +189,11 @@ Shows  → crypt             | $CRYPT_TV
   start_caffeinate
 
   if [[ -d "$FROM_LOCAL" ]]; then
+    # Directory upload: filters are OK and useful
     CMD=(rclone copy "$FROM_LOCAL" "$DEST_PATH" -P -v "${RCLONE_EXCLUDES[@]}")
   else
-    CMD=(rclone copyto "$FROM_LOCAL" "$DEST_PATH" -P -v "${RCLONE_EXCLUDES[@]}")
+    # Single-file upload: copyto + filters is NOT allowed by rclone, and excludes are irrelevant anyway
+    CMD=(rclone copyto "$FROM_LOCAL" "$DEST_PATH" -P -v)
   fi
 
   [[ $COMMIT -eq 0 ]] && CMD+=(--dry-run)
