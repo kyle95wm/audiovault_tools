@@ -35,6 +35,7 @@ trap stop_caffeinate EXIT INT TERM
 
 COMMIT=0
 FROM_LOCAL=""
+LOCAL_MOVE=0
 CLEAN_MACOS_JUNK="auto" # auto | on | off
 
 # ---------------- argument parsing ----------------
@@ -48,6 +49,10 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ -z "${1:-}" ]] && { echo "Error: --from-local requires a path" >&2; exit 2; }
       FROM_LOCAL="$1"
+      shift
+      ;;
+    --move)
+      LOCAL_MOVE=1
       shift
       ;;
     --clean-macos-junk)
@@ -65,10 +70,13 @@ Usage:
   rclone-crypt-mover.sh --commit
   rclone-crypt-mover.sh --from-local <path>
   rclone-crypt-mover.sh --from-local <path> --commit
+  rclone-crypt-mover.sh --from-local <path> --move
+  rclone-crypt-mover.sh --from-local <path> --move --commit
 
 Options:
   --commit               Perform real operations (otherwise dry-run)
   --from-local <path>    Copy a local file/folder to a selected destination (copy, not move)
+  --move                 When --from-local is used, upload via move (deletes local source after success)
   --clean-macos-junk     Force-exclude macOS metadata junk files for local uploads
   --no-clean-macos-junk  Disable auto-excludes for local uploads
   --help                 Show this help
@@ -76,9 +84,9 @@ Options:
 Defaults:
   - Dry-run by default.
   - On macOS, when --from-local is used, macOS junk excludes are auto-enabled unless disabled.
-    (Note: excludes apply to directory uploads; single-file uploads use copyto and don't use filters.)
+    (Note: excludes apply to directory uploads; single-file uploads use copyto/moveto and don't use filters.)
   - On macOS, after confirmation, the script runs `caffeinate -i` to prevent sleep.
-  - In --commit move mode, the script auto-cleans empty directories left behind on the source.
+  - In --commit move mode (remote→remote), the script auto-cleans empty directories left behind on the source.
 EOF
       exit 0
       ;;
@@ -88,6 +96,11 @@ EOF
       ;;
   esac
 done
+
+if [[ $LOCAL_MOVE -eq 1 && -z "$FROM_LOCAL" ]]; then
+  echo "Error: --move is only valid with --from-local" >&2
+  exit 2
+fi
 
 # ---------------- macOS junk excludes (auto for --from-local on macOS) ----------------
 EFFECTIVE_CLEAN=0
@@ -177,7 +190,11 @@ Shows  → crypt             | $CRYPT_TV
   fi
 
   if [[ $COMMIT -eq 1 ]]; then
-    echo "MODE: REAL COPY"
+    if [[ $LOCAL_MOVE -eq 1 ]]; then
+      echo "MODE: REAL MOVE (local source will be deleted after upload)"
+    else
+      echo "MODE: REAL COPY"
+    fi
   else
     echo "MODE: DRY RUN"
   fi
@@ -186,14 +203,35 @@ Shows  → crypt             | $CRYPT_TV
   read -r -p "Proceed? (yes/no): " confirm
   case "$confirm" in yes|y|Y) ;; *) echo "Cancelled."; exit 0 ;; esac
 
+  # Extra safety: local MOVE will delete the source after successful upload
+  if [[ $COMMIT -eq 1 && $LOCAL_MOVE -eq 1 ]]; then
+    echo
+    echo "WARNING: This will REMOVE the local source after the upload succeeds:"
+    echo "  $FROM_LOCAL"
+    echo
+    read -r -p "Type DELETE to confirm: " delconfirm
+    if [[ "$delconfirm" != "DELETE" ]]; then
+      echo "Cancelled."
+      exit 0
+    fi
+  fi
+
   start_caffeinate
 
   if [[ -d "$FROM_LOCAL" ]]; then
     # Directory upload: filters are OK and useful
-    CMD=(rclone copy "$FROM_LOCAL" "$DEST_PATH" -P -v "${RCLONE_EXCLUDES[@]}")
+    if [[ $LOCAL_MOVE -eq 1 ]]; then
+      CMD=(rclone move "$FROM_LOCAL" "$DEST_PATH" -P -v "${RCLONE_EXCLUDES[@]}")
+    else
+      CMD=(rclone copy "$FROM_LOCAL" "$DEST_PATH" -P -v "${RCLONE_EXCLUDES[@]}")
+    fi
   else
-    # Single-file upload: copyto + filters is NOT allowed by rclone, and excludes are irrelevant anyway
-    CMD=(rclone copyto "$FROM_LOCAL" "$DEST_PATH" -P -v)
+    # Single-file upload: copyto/moveto + filters is NOT allowed by rclone, and excludes are irrelevant anyway
+    if [[ $LOCAL_MOVE -eq 1 ]]; then
+      CMD=(rclone moveto "$FROM_LOCAL" "$DEST_PATH" -P -v)
+    else
+      CMD=(rclone copyto "$FROM_LOCAL" "$DEST_PATH" -P -v)
+    fi
   fi
 
   [[ $COMMIT -eq 0 ]] && CMD+=(--dry-run)
