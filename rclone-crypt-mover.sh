@@ -75,7 +75,7 @@ Usage:
 
 Options:
   --commit               Perform real operations (otherwise dry-run)
-  --from-local <path>    Copy a local file/folder to a selected destination (copy, not move)
+  --from-local <path>    Upload a local file/folder to a selected destination
   --move                 When --from-local is used, upload via move (deletes local source after success)
   --clean-macos-junk     Force-exclude macOS metadata junk files for local uploads
   --no-clean-macos-junk  Disable auto-excludes for local uploads
@@ -87,6 +87,7 @@ Defaults:
     (Note: excludes apply to directory uploads; single-file uploads use copyto/moveto and don't use filters.)
   - On macOS, after confirmation, the script runs `caffeinate -i` to prevent sleep.
   - In --commit move mode (remote→remote), the script auto-cleans empty directories left behind on the source.
+  - In --commit local move mode for directory uploads, the script deletes empty source dirs (and does a final empty-dir cleanup).
 EOF
       exit 0
       ;;
@@ -221,7 +222,7 @@ Shows  → crypt             | $CRYPT_TV
   if [[ -d "$FROM_LOCAL" ]]; then
     # Directory upload: filters are OK and useful
     if [[ $LOCAL_MOVE -eq 1 ]]; then
-      CMD=(rclone move "$FROM_LOCAL" "$DEST_PATH" -P -v "${RCLONE_EXCLUDES[@]}")
+      CMD=(rclone move "$FROM_LOCAL" "$DEST_PATH" -P -v "${RCLONE_EXCLUDES[@]}" --delete-empty-src-dirs)
     else
       CMD=(rclone copy "$FROM_LOCAL" "$DEST_PATH" -P -v "${RCLONE_EXCLUDES[@]}")
     fi
@@ -243,6 +244,15 @@ Shows  → crypt             | $CRYPT_TV
   echo
 
   "${CMD[@]}"
+
+  # Final cleanup for local directory MOVE: remove any remaining empty directories (including root)
+  if [[ $COMMIT -eq 1 && $LOCAL_MOVE -eq 1 && -d "$FROM_LOCAL" ]]; then
+    echo
+    echo "Final cleanup: removing any remaining empty directories under local source..."
+    rclone rmdirs "$FROM_LOCAL" -v || true
+    echo
+  fi
+
   echo "Done."
   exit 0
 fi
