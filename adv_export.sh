@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# avo_mp3_export.sh (adv_export)
-# Batch export to MP3 192 kbps CBR (LAME), joint stereo disabled.
+# avo_mp3_export.sh
+# Batch export to MP3 with bitrate chosen from source audio bitrate.
 # - Prompts (or lets you specify) which audio stream to use when inputs have multiple tracks.
 # - Warns/skips if chosen stream has >2 ch unless --force is used.
 # - If --force and layout is 5.1, applies a controlled downmix pan matrix (optional LFE blend with --lfe).
@@ -49,24 +49,28 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Expand directory contents if --dir provided
 if [[ -n "${DIR_MODE}" ]]; then
   if [[ ! -d "$DIR_MODE" ]]; then
-    echo "❌ Error: '$DIR_MODE' is not a directory." >&2; exit 1
+    echo "❌ Error: '$DIR_MODE' is not a directory." >&2
+    exit 1
   fi
   shopt -s nullglob
   for ext in wav aif aiff flac m4a mp4 mkv mov mka aac ac3 eac3 ogg opus wma; do
-    for f in "$DIR_MODE"/*."$ext"; do FILES+=("$f"); done
+    for f in "$DIR_MODE"/*."$ext"; do
+      FILES+=("$f")
+    done
   done
   shopt -u nullglob
 fi
 
-if [[ ${#FILES[@]} -eq 0 ]]; then usage; exit 1; fi
+if [[ ${#FILES[@]} -eq 0 ]]; then
+  usage
+  exit 1
+fi
 
 command -v ffprobe >/dev/null 2>&1 || { echo "❌ ffprobe required in PATH." >&2; exit 1; }
 command -v ffmpeg  >/dev/null 2>&1 || { echo "❌ ffmpeg required in PATH."  >&2; exit 1; }
 
-# Helpers
 count_audio_streams() {
   ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$1" | wc -l | tr -d ' '
 }
@@ -81,10 +85,48 @@ layout_for_stream() {
   ffprobe -v error -select_streams a:"$idx" -show_entries stream=channel_layout -of default=nk=1:nw=1 "$in" 2>/dev/null
 }
 
+stream_bitrate_kbps() {
+  local in="$1" idx="$2"
+  local br
+
+  br="$(ffprobe -v error -select_streams a:"$idx" \
+    -show_entries stream=bit_rate \
+    -of default=nk=1:nw=1 "$in" 2>/dev/null | head -n1)"
+
+  if [[ -z "$br" || "$br" == "N/A" ]]; then
+    br="$(ffprobe -v error -show_entries format=bit_rate \
+      -of default=nk=1:nw=1 "$in" 2>/dev/null | head -n1)"
+  fi
+
+  [[ "$br" =~ ^[0-9]+$ ]] || { echo ""; return; }
+  echo $(( br / 1000 ))
+}
+
+choose_mp3_bitrate() {
+  local src_kbps="$1"
+
+  if [[ -z "$src_kbps" || ! "$src_kbps" =~ ^[0-9]+$ ]]; then
+    echo "192k"
+    return
+  fi
+
+  if (( src_kbps >= 192 )); then
+    echo "192k"
+  elif (( src_kbps >= 160 )); then
+    echo "160k"
+  elif (( src_kbps >= 128 )); then
+    echo "128k"
+  elif (( src_kbps >= 96 )); then
+    echo "96k"
+  else
+    echo "96k"
+  fi
+}
+
 pick_two_ch_or_zero() {
   local in="$1"
-  local n; n=$(count_audio_streams "$in")
-  local i ch
+  local n i ch
+  n=$(count_audio_streams "$in")
   for (( i=0; i<n; i++ )); do
     ch="$(channels_for_stream "$in" "$i")"
     [[ "$ch" == "2" ]] && { echo "$i"; return; }
@@ -114,39 +156,48 @@ list_audio_streams() {
 
 select_stream_for_file() {
   local in="$1"
-  local n_streams; n_streams=$(count_audio_streams "$in")
+  local n_streams
+  n_streams=$(count_audio_streams "$in")
+
   if [[ -n "$STREAM_OVERRIDE" ]]; then
-    echo "$STREAM_OVERRIDE"; return
+    echo "$STREAM_OVERRIDE"
+    return
   fi
   if (( AUTO_PICK == 1 )); then
-    pick_two_ch_or_zero "$in"; return
+    pick_two_ch_or_zero "$in"
+    return
   fi
   if (( n_streams <= 1 )); then
-    echo "0"; return
+    echo "0"
+    return
   fi
+
   list_audio_streams "$in"
   read -rp "Select audio stream index (default 0): " sel
   [[ -z "${sel:-}" ]] && sel="0"
   echo "$sel"
 }
 
-# Build pan filter for 5.1 → stereo (center -3 dB; surrounds -6 dB; optional LFE)
 build_pan_filter_5_1() {
   local with_lfe="$1"
   if (( with_lfe == 1 )); then
-    # Include a little LFE (~ -9 dB) into both fronts
     echo "pan=stereo|FL=0.707*FL+0.707*FC+0.5*BL+0.5*SL+0.35*LFE|FR=0.707*FR+0.707*FC+0.5*BR+0.5*SR+0.35*LFE"
   else
     echo "pan=stereo|FL=0.707*FL+0.707*FC+0.5*BL+0.5*SL|FR=0.707*FR+0.707*FC+0.5*BR+0.5*SR"
   fi
 }
 
-# Main loop
 for input in "${FILES[@]}"; do
-  if [[ ! -f "$input" ]]; then echo "⚠️  Skipping (not a file): $input" >&2; continue; fi
+  if [[ ! -f "$input" ]]; then
+    echo "⚠️  Skipping (not a file): $input" >&2
+    continue
+  fi
 
   stream_idx="$(select_stream_for_file "$input")"
-  [[ "$stream_idx" =~ ^[0-9]+$ ]] || { echo "❌ Invalid stream index '$stream_idx' for $input" >&2; continue; }
+  [[ "$stream_idx" =~ ^[0-9]+$ ]] || {
+    echo "❌ Invalid stream index '$stream_idx' for $input" >&2
+    continue
+  }
 
   ch="$(channels_for_stream "$input" "$stream_idx" || echo "")"
   if [[ -z "$ch" ]]; then
@@ -155,15 +206,22 @@ for input in "${FILES[@]}"; do
   fi
 
   lay="$(layout_for_stream "$input" "$stream_idx" || echo "")"
+  src_kbps="$(stream_bitrate_kbps "$input" "$stream_idx")"
+  mp3_bitrate="$(choose_mp3_bitrate "$src_kbps")"
+
+  if [[ -n "$src_kbps" ]]; then
+    echo "ℹ️  Source bitrate for a:$stream_idx appears to be ${src_kbps} kbps; using MP3 CBR ${mp3_bitrate}." >&2
+  else
+    echo "ℹ️  Could not detect source bitrate for a:$stream_idx; defaulting to MP3 CBR ${mp3_bitrate}." >&2
+  fi
 
   PAN_FILTER=""
   if (( ch > 2 )); then
     if (( FORCE == 0 )); then
       echo "🚫 $input (a:$stream_idx) has ${ch} channels. Skipping to avoid unintended surround→stereo fold-down." >&2
-      echo "   Use --force if you *intend* to downmix." >&2
+      echo "   Use --force if you intend to downmix." >&2
       continue
     else
-      # Apply controlled downmix only for 5.1 layouts
       if [[ "$lay" == 5.1* || "$lay" == *"5.1"* || "$ch" == "6" ]]; then
         PAN_FILTER="$(build_pan_filter_5_1 "$INCLUDE_LFE")"
         echo "⚠️  Forcing export from 5.1 (${lay:-unknown}) → stereo MP3 with controlled pan matrix." >&2
@@ -176,18 +234,14 @@ for input in "${FILES[@]}"; do
 
   base="${input##*/}"
   name="${base%.*}"
-  # Strip a trailing "_Stereo" (case-insensitive) from the base name
-  # e.g., "MyFile_Stereo.wav" -> "MyFile.mp3"
   name="$(printf '%s' "$name" | sed -E 's/_[Ss][Tt][Ee][Rr][Ee][Oo]$//')"
-  # (Optional) also strip _Mono if you ever need it:
-  # name="$(printf '%s' "$name" | sed -E 's/_[Mm][Oo][Nn][Oo]$//')"
   out="${name}.mp3"
 
   echo "🎧 Processing: $input  (a:$stream_idx, ${ch}ch${lay:+, $lay})  →  $out" >&2
 
-  # Build ffmpeg args
   map=(-map "0:a:${stream_idx}")
-  audio=(-c:a libmp3lame -b:a 192k -joint_stereo 0)
+  audio=(-c:a libmp3lame -b:a "$mp3_bitrate" -joint_stereo 0)
+
   if [[ -n "$PAN_FILTER" ]]; then
     audio=(-af "$PAN_FILTER" "${audio[@]}")
   fi
